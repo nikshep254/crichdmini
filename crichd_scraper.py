@@ -11,9 +11,8 @@ except ImportError:
     ZoneInfo = None
 
 # --- Configuration ---
-# If the domains change in the future, you can update them here.
 CRICHD_BASE_URL = "https://crichd.com.co"
-PLAYER_DOMAIN_PATTERN = r"https://(player\.)?dadocric\.st/player\.php"
+PLAYER_DOMAIN_PATTERN = r"https://(?:player\.)?dadocric\.st/player\.php"
 PLAYERADO_EMBED_URL = "https://playerado.top/embed2.php"
 ATPLAY_URL = "https://player0003.com/atplay.php"
 OUTPUT_M3U_FILE = "siamscrichd.m3u"
@@ -36,7 +35,8 @@ def get_channel_links():
     if not main_page_content:
         logging.error("Failed to fetch CricHD homepage")
         return []
-    channel_links = re.findall(r'<li class="has-sub"><a href="(' + CRICHD_BASE_URL + r'/channels/[^"]+)"', main_page_content)
+    pattern = r'<li class="has-sub"><a href="(' + re.escape(CRICHD_BASE_URL) + r'/channels/[^"]+)"'
+    channel_links = re.findall(pattern, main_page_content)
     logging.info(f"Found {len(channel_links)} channel links")
     return channel_links
 
@@ -47,7 +47,9 @@ def get_stream_link(channel_url):
         logging.error(f"Failed to fetch channel page: {channel_url}")
         return None, None, None
 
-    player_link_match = re.search(f'<a href="({PLAYER_DOMAIN_PATTERN}\'?id=[^"]+)"', channel_page_content)
+    pattern_string = r"<a[^>]+href=['\"](" + PLAYER_DOMAIN_PATTERN + r"\?id=[^\'\"]+)['\"]"
+    player_link_match = re.search(pattern_string, channel_page_content)
+
     if not player_link_match:
         logging.warning(f"Player link not found on {channel_url}")
         return None, None, None
@@ -89,70 +91,66 @@ def get_stream_link(channel_url):
     func_name = func_name_match.group(1)
     logging.info(f"Found player function: {func_name}")
 
-    func_def_match = re.search(f'function {func_name}\(\)(.*?)\{{(.*?)\}}\s*', atplay_page_content, re.DOTALL)
+    func_def_pattern = r'function\s+' + func_name + r'\s*\(\)\s*\{(.*?)\}'
+    func_def_match = re.search(func_def_pattern, atplay_page_content, re.DOTALL)
     if not func_def_match:
         logging.warning(f"Could not find function definition for {func_name} in {atplay_url}")
         return None, None, None
-    
-    func_body = func_def_match.group(2)
+    func_body = func_def_match.group(1)
 
-    stream_var_match = re.search(r'var url = (\w+);', func_body)
-    if not stream_var_match:
-        logging.warning(f"Could not find stream var in function body")
-        return None, None, None
-    stream_var = stream_var_match.group(1)
-
+    base_url_var_match = re.search(r'var url = (\w+);', func_body)
     md5_var_match = re.search(r'url \+= "\?md5="\s*\+\s*(\w+);', func_body)
     expires_var_match = re.search(r'url \+= "&expires="\s*\+\s*(\w+);', func_body)
-    ch_var_match = re.search(r'url \+= "&ch="\s*\+\s*(\w+);', func_body)
     s_var_match = re.search(r'url \+= "&s="\s*\+\s*(\w+);', func_body)
 
-    if not (md5_var_match and expires_var_match and ch_var_match and s_var_match):
+    if not (base_url_var_match and md5_var_match and expires_var_match and s_var_match):
         logging.warning("Could not find all parameter vars in function body")
         return None, None, None
-        
+
+    base_url_var = base_url_var_match.group(1)
     md5_var = md5_var_match.group(1)
     expires_var = expires_var_match.group(1)
-    ch_var = ch_var_match.group(1)
     s_var = s_var_match.group(1)
 
-    stream_def_match = re.search(f"var {stream_var} = (.*?);", atplay_page_content)
-    if not stream_def_match:
-        logging.warning(f"Could not find definition for stream var {stream_var}")
-        return None, None, None
-        
-    stream_def = stream_def_match.group(1)
-    stream_parts = [part.strip() for part in stream_def.split('+')]
-    
-    base_url_var = stream_parts[0]
-    base_url_def_match = re.search(f"var {base_url_var} = (.*?);", atplay_page_content)
-    if not base_url_def_match:
-        logging.warning(f"Could not find definition for base url var {base_url_var}")
-        return None, None, None
-    
-    base_url = eval(base_url_def_match.group(1))
-    
-    stream_link = base_url + eval(stream_parts[1]) + fid + eval(stream_parts[3])
-
-    md5_val_match = re.search(f'var {md5_var}\s*=\s*"(.*?)"', atplay_page_content)
-    expires_val_match = re.search(f'var {expires_var}\s*=\s*"(.*?)"', atplay_page_content)
-    s_val_match = re.search(f'var {s_var}\s*=\s*"(.*?)"', atplay_page_content)
+    md5_val_match = re.search(r'var ' + md5_var + r'\s*=\s*"(.*?)"', atplay_page_content)
+    expires_val_match = re.search(r'var ' + expires_var + r'\s*=\s*"(.*?)"', atplay_page_content)
+    s_val_match = re.search(r'var ' + s_var + r'\s*=\s*"(.*?)"', atplay_page_content)
 
     if not (md5_val_match and expires_val_match and s_val_match):
-        logging.warning(f"Could not find values for all parameters")
+        logging.warning(f"Could not find values for all parameters in {atplay_url}")
         return None, None, None
 
     md5 = md5_val_match.group(1)
     expires = expires_val_match.group(1)
-    s = s_val_match.group(1)
+    s_val = s_val_match.group(1)
 
-    final_stream_link = f"{stream_link}?md5={md5}&expires={expires}&ch={fid}&s={s}"
-
+    base_url_constructor_match = re.search(r'var ' + base_url_var + r'\s*=\s*(.*?);', atplay_page_content)
+    if not base_url_constructor_match:
+        logging.warning(f"Could not find constructor for base url var {base_url_var}")
+        return None, None, None
+        
+    constructor_string = base_url_constructor_match.group(1)
+    real_base_url_var = constructor_string.split('+')[0].strip()
+    
+    real_base_url_match = re.search(r"var " + real_base_url_var + r" = (.*?);", atplay_page_content)
+    if not real_base_url_match:
+        logging.warning(f"Could not find definition for real base url var {real_base_url_var}")
+        return None, None, None
+        
+    base_url_str_with_plus = real_base_url_match.group(1)
+    js_string_parts = re.findall(r"'(.*?)'", base_url_str_with_plus)
+    base_url = "".join(js_string_parts)
+    
+    v_param = fid
+    stream_path = f"/hls/{v_param}.m3u8"
+    final_stream_link = f"{base_url}{stream_path}?md5={md5}&expires={expires}&ch={v_param}&s={s_val}"
+    
     channel_name_match = re.search(r'<title>(.*?)</title>', channel_page_content)
     channel_name = channel_name_match.group(1).split(" Live Streaming")[0] if channel_name_match else "Unknown Channel"
 
     logging.info(f"Successfully extracted stream for {channel_name}: {final_stream_link}")
     return channel_name, final_stream_link, "https://player0003.com/"
+
 
 if __name__ == "__main__":
     channel_links = get_channel_links()
@@ -169,7 +167,6 @@ if __name__ == "__main__":
         update_time = datetime.datetime.now(dhaka_tz).strftime('%Y-%m-%d %I:%M:%S %p')
     else: # Fallback for older python
         update_time = datetime.datetime.now().strftime('%Y-%m-%d %I:%M:%S %p') + " UTC"
-
 
     with open(OUTPUT_M3U_FILE, "w", encoding='utf-8') as f:
         f.write(f'#EXTM3U x-tvg-url="{EPG_URL}"\n')
