@@ -2,6 +2,13 @@
 import re
 import subprocess
 import logging
+import datetime
+
+# Fallback for ZoneInfo for older Python versions
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 # --- Configuration ---
 # If the domains change in the future, you can update them here.
@@ -38,12 +45,12 @@ def get_stream_link(channel_url):
     channel_page_content = run_command(f"curl -L {channel_url}")
     if not channel_page_content:
         logging.error(f"Failed to fetch channel page: {channel_url}")
-        return None, None
+        return None, None, None
 
     player_link_match = re.search(f'<a href="({PLAYER_DOMAIN_PATTERN}\'?id=[^"]+)"', channel_page_content)
     if not player_link_match:
         logging.warning(f"Player link not found on {channel_url}")
-        return None, None
+        return None, None, None
 
     player_link = player_link_match.group(1)
     player_id = player_link.split("id=")[1]
@@ -53,7 +60,7 @@ def get_stream_link(channel_url):
     embed_page_content = run_command(f"curl -L '{playerado_url}'")
     if not embed_page_content:
         logging.error(f"Failed to fetch embed page: {playerado_url}")
-        return None, None
+        return None, None, None
 
     fid_match = re.search(r'fid\s*=\s*"([^"]+)"', embed_page_content)
     v_con_match = re.search(r'v_con\s*=\s*"([^"]+)"', embed_page_content)
@@ -61,7 +68,7 @@ def get_stream_link(channel_url):
 
     if not (fid_match and v_con_match and v_dt_match):
         logging.warning(f"Could not find all required variables on {playerado_url}")
-        return None, None
+        return None, None, None
 
     fid = fid_match.group(1)
     v_con = v_con_match.group(1)
@@ -73,26 +80,26 @@ def get_stream_link(channel_url):
     atplay_page_content = run_command(f"curl -iL --user-agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\" --referer \"https://playerado.top/\" '{atplay_url}'")
     if not atplay_page_content:
         logging.error(f"Failed to fetch atplay page: {atplay_url}")
-        return None, None
+        return None, None, None
 
     func_name_match = re.search(r'player\.load\({source: (\w+)\(\),', atplay_page_content)
     if not func_name_match:
         logging.warning(f"Could not find player.load function in {atplay_url}")
-        return None, None
+        return None, None, None
     func_name = func_name_match.group(1)
     logging.info(f"Found player function: {func_name}")
 
     func_def_match = re.search(f'function {func_name}\(\)(.*?)\{{(.*?)\}}\s*', atplay_page_content, re.DOTALL)
     if not func_def_match:
         logging.warning(f"Could not find function definition for {func_name} in {atplay_url}")
-        return None, None
+        return None, None, None
     
     func_body = func_def_match.group(2)
 
     stream_var_match = re.search(r'var url = (\w+);', func_body)
     if not stream_var_match:
         logging.warning(f"Could not find stream var in function body")
-        return None, None
+        return None, None, None
     stream_var = stream_var_match.group(1)
 
     md5_var_match = re.search(r'url \+= "\?md5="\s*\+\s*(\w+);', func_body)
@@ -102,7 +109,7 @@ def get_stream_link(channel_url):
 
     if not (md5_var_match and expires_var_match and ch_var_match and s_var_match):
         logging.warning("Could not find all parameter vars in function body")
-        return None, None
+        return None, None, None
         
     md5_var = md5_var_match.group(1)
     expires_var = expires_var_match.group(1)
@@ -112,7 +119,7 @@ def get_stream_link(channel_url):
     stream_def_match = re.search(f"var {stream_var} = (.*?);", atplay_page_content)
     if not stream_def_match:
         logging.warning(f"Could not find definition for stream var {stream_var}")
-        return None, None
+        return None, None, None
         
     stream_def = stream_def_match.group(1)
     stream_parts = [part.strip() for part in stream_def.split('+')]
@@ -121,7 +128,7 @@ def get_stream_link(channel_url):
     base_url_def_match = re.search(f"var {base_url_var} = (.*?);", atplay_page_content)
     if not base_url_def_match:
         logging.warning(f"Could not find definition for base url var {base_url_var}")
-        return None, None
+        return None, None, None
     
     base_url = eval(base_url_def_match.group(1))
     
@@ -133,7 +140,7 @@ def get_stream_link(channel_url):
 
     if not (md5_val_match and expires_val_match and s_val_match):
         logging.warning(f"Could not find values for all parameters")
-        return None, None
+        return None, None, None
 
     md5 = md5_val_match.group(1)
     expires = expires_val_match.group(1)
@@ -150,11 +157,26 @@ def get_stream_link(channel_url):
 if __name__ == "__main__":
     channel_links = get_channel_links()
     
+    channels_data = []
+    for link in channel_links:
+        name, stream, referrer = get_stream_link(link)
+        if name and stream:
+            channels_data.append((name, stream, referrer))
+
+    total_channels = len(channels_data)
+    if ZoneInfo:
+        dhaka_tz = ZoneInfo('Asia/Dhaka')
+        update_time = datetime.datetime.now(dhaka_tz).strftime('%Y-%m-%d %I:%M:%S %p')
+    else: # Fallback for older python
+        update_time = datetime.datetime.now().strftime('%Y-%m-%d %I:%M:%S %p') + " UTC"
+
+
     with open(OUTPUT_M3U_FILE, "w", encoding='utf-8') as f:
         f.write(f'#EXTM3U x-tvg-url="{EPG_URL}"\n')
-        for link in channel_links:
-            name, stream, referrer = get_stream_link(link)
-            if name and stream:
-                f.write(f'#EXTINF:-1 tvg-name="{name}",{name}\n')
-                f.write(f"#EXTVLCOPT:http-referrer={referrer}\n")
-                f.write(f"{stream}\n")
+        f.write(f'# Made by Siam3310\n')
+        f.write(f'# Last updated: {update_time} (Bangladesh/Dhaka)\n')
+        f.write(f'# Total channels: {total_channels}\n\n')
+        for name, stream, referrer in channels_data:
+            f.write(f'#EXTINF:-1 tvg-name="{name}",{name}\n')
+            f.write(f"#EXTVLCOPT:http-referrer={referrer}\n")
+            f.write(f"{stream}\n")
